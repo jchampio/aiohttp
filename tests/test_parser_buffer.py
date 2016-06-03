@@ -284,3 +284,31 @@ def test_chunks_parser(stream, loop, buf):
         pass
 
     assert bytes(buf) == b'data'
+
+
+def test_match(buf):
+    p = buf.match(b'hello')
+
+    next(p)
+    p.send(b'he')
+    try:
+        p.send(b'llo there')
+    except StopIteration as exc:
+        res = exc.value
+
+    assert res == b'hello'
+    assert bytes(buf) == b'hello there'
+
+
+def test_match_failure(buf):
+    p = buf.match(b'hello')
+
+    next(p)
+    p.send(b'he')
+    try:
+        p.send(b' is here')
+    except StopIteration as exc:
+        res = exc.value
+
+    assert res is None
+    assert bytes(buf) == b'he is here'

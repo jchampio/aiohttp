@@ -485,6 +485,29 @@ class ParserBuffer:
 
             self._writer.send((yield))
 
+    def match(self, expected):
+        """match() reads and returns the `expected` bytes sequence if and only
+        if it is an exact match. Otherwise, None is returned. The internal
+        buffer is not changed in either case."""
+
+        expected_len = len(expected)
+
+        while True:
+            if self._helper.exception:
+                raise self._helper.exception
+
+            data_len = len(self._data)
+
+            if not self._data.startswith(expected[:data_len]):
+                # Failed to match.
+                return None
+
+            if data_len >= expected_len:
+                data = self._data[:expected_len]
+                return data
+
+            self._writer.send((yield))
+
     def extend(self, data):
         self._data.extend(data)
 

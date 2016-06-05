@@ -547,3 +547,15 @@ def test_keep_alive_timeout_default(srv):
 def test_keep_alive_timeout_nondefault(make_srv):
     srv = make_srv(keep_alive=10)
     assert 10 == srv.keep_alive_timeout
+
+
+def xtest_srv_http2_direct_connection(make_srv, loop):
+    srv = make_srv(debug=True)
+    transport = mock.Mock()
+    srv.connection_made(transport)
+
+    srv.reader.feed_data(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+
+    loop.run_until_complete(srv._request_handler)
+    print(transport.write.mock_calls[0][1][0])
+    assert False

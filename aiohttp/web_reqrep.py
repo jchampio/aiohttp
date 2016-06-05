@@ -24,6 +24,8 @@ from multidict import (CIMultiDictProxy,
 from . import hdrs
 from .helpers import reify
 from .protocol import Response as ResponseImpl, HttpVersion10, HttpVersion11
+from .protocol import Http2Response as Http2ResponseImpl, HttpVersion20
+
 from .streams import EOF_MARKER
 
 
@@ -100,7 +102,8 @@ class Request(dict, HeadersMixin):
                     hdrs.METH_TRACE, hdrs.METH_DELETE}
 
     def __init__(self, app, message, payload, transport, reader, writer, *,
-                 secure_proxy_ssl_header=None):
+                 secure_proxy_ssl_header=None, h2_conn=None,
+                 h2_stream_id=None):
         self._app = app
         self._message = message
         self._transport = transport
@@ -119,6 +122,8 @@ class Request(dict, HeadersMixin):
         self._has_body = not payload.at_eof()
 
         self._secure_proxy_ssl_header = secure_proxy_ssl_header
+        self._h2_conn = h2_conn
+        self._h2_stream_id = h2_stream_id
 
     @reify
     def scheme(self):
@@ -704,12 +709,20 @@ class StreamResponse(HeadersMixin):
             keep_alive = request.keep_alive
         self._keep_alive = keep_alive
 
-        resp_impl = self._resp_impl = ResponseImpl(
-            request._writer,
-            self._status,
-            request.version,
-            not keep_alive,
-            self._reason)
+        if request.version == HttpVersion20:
+            resp_impl = self._resp_impl = Http2ResponseImpl(
+                request._h2_conn,
+                request._writer,
+                self._status,
+                request._h2_stream_id)
+        else:
+            resp_impl = self._resp_impl = ResponseImpl(
+                request._writer,
+                self._status,
+                request.version,
+                not keep_alive,
+                self._reason)
+        self._resp_impl = resp_impl
 
         self._copy_cookies()
 
@@ -717,7 +730,10 @@ class StreamResponse(HeadersMixin):
             self._start_compression(request)
 
         if self._chunked:
-            if request.version != HttpVersion11:
+            if request.version == HttpVersion20:
+                raise RuntimeError("Chunked encoding is not supported in "
+                                   "HTTP/2")
+            elif request.version != HttpVersion11:
                 raise RuntimeError("Using chunked encoding is forbidden "
                                    "for HTTP/{0.major}.{0.minor}".format(
                                        request.version))
@@ -729,8 +745,10 @@ class StreamResponse(HeadersMixin):
         for key, val in headers:
             resp_impl.add_header(key, val)
 
-        resp_impl.transport.set_tcp_nodelay(self._tcp_nodelay)
-        resp_impl.transport.set_tcp_cork(self._tcp_cork)
+        if request.version < HttpVersion20:
+            resp_impl.transport.set_tcp_nodelay(self._tcp_nodelay)
+            resp_impl.transport.set_tcp_cork(self._tcp_cork)
+
         resp_impl.send_headers()
         return resp_impl
 

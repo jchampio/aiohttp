@@ -60,7 +60,7 @@ class RequestHandler(ServerHttpProtocol):
         super().connection_lost(exc)
 
     @asyncio.coroutine
-    def handle_request(self, message, payload):
+    def handle_request(self, message, payload, stream_id=None):
         if self.access_log:
             now = self._loop.time()
 
@@ -68,7 +68,8 @@ class RequestHandler(ServerHttpProtocol):
         request = web_reqrep.Request(
             app, message, payload,
             self.transport, self.reader, self.writer,
-            secure_proxy_ssl_header=self._secure_proxy_ssl_header)
+            secure_proxy_ssl_header=self._secure_proxy_ssl_header,
+            h2_conn=self._conn, h2_stream_id=stream_id)
         self._meth = request.method
         self._path = request.path
         try:

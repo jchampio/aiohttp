@@ -19,6 +19,7 @@ from multidict import upstr
 
 from . import hdrs, helpers
 from .abc import AbstractRouter, AbstractMatchInfo, AbstractView
+from .log import internal_logger
 from .protocol import HttpVersion11
 from .web_exceptions import (HTTPMethodNotAllowed, HTTPNotFound,
                              HTTPNotModified, HTTPExpectationFailed)
@@ -546,6 +547,7 @@ class StaticRoute(Route):
         :class:`StaticRoute`.
         """
         chunk_size = self._chunk_size
+        internal_logger.error('fallback')
 
         chunk = fobj.read(chunk_size)
         while chunk and count > chunk_size:
@@ -603,6 +605,7 @@ class StaticRoute(Route):
         resp.set_tcp_cork(True)
         try:
             yield from resp.prepare(request)
+            internal_logger.error(resp._resp_impl)
 
             with filepath.open('rb') as f:
                 yield from self._sendfile(request, resp, f, file_size)

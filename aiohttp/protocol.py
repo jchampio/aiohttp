@@ -20,7 +20,7 @@ __all__ = ('HttpMessage', 'Request', 'Response',
            'HttpVersion', 'HttpVersion10', 'HttpVersion11',
            'RawRequestMessage', 'RawResponseMessage',
            'HttpPrefixParser', 'HttpRequestParser', 'HttpResponseParser',
-           'HttpPayloadParser')
+           'HttpPayloadParser', 'HttpVersionParser')
 
 ASCIISET = set(string.printable)
 METHRE = re.compile('[A-Z0-9$-_.]+')
@@ -36,6 +36,7 @@ HttpVersion = collections.namedtuple(
     'HttpVersion', ['major', 'minor'])
 HttpVersion10 = HttpVersion(1, 0)
 HttpVersion11 = HttpVersion(1, 1)
+HttpVersion20 = HttpVersion(2, 0)  # HTTP/2 drops the minor versioning scheme
 
 RawStatusLineMessage = collections.namedtuple(
     'RawStatusLineMessage', ['method', 'path', 'version'])
@@ -482,6 +483,25 @@ def filter_pipe(filter, filter2, *,
         chunk = yield EOL_MARKER
 
 
+class HttpVersionParser:
+    """Decides whether we are speaking HTTP/1.x or HTTP/2. This parser keys its
+    decision off of the (non) existence of the HTTP/2 PRIamble, and is
+    non-destructive to the data buffer."""
+
+    def __init__(self):
+        # This is the HTTP/2 preface: "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+        preface_hex = '505249202a20485454502f322e300d0a0d0a534d0d0a0d0a'
+        self._http2_preface = bytearray.fromhex(preface_hex)
+
+    def __call__(self, out, buf):
+        raw_data = yield from buf.match(self._http2_preface)
+
+        version = HttpVersion20 if (raw_data is not None) else HttpVersion11
+
+        out.feed_data(version, 0)
+        out.feed_eof()
+
+
 class HttpMessage(ABC):
     """HttpMessage allows to write headers and payload to a stream.
 
@@ -912,3 +932,131 @@ class Request(HttpMessage):
         return (self.length is None and
                 self.version >= HttpVersion11 and
                 self.status not in (304, 204))
+
+
+class Http2Parser:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def __call__(self, out, buf):
+        """
+        Receives data from the buffer, parses it, and then sends any events
+        out.
+
+        This only terminates when the connection is terminated by the remote
+        peer.
+        """
+        while True:
+            # XXX: 65kb is totally arbitrary here: consider tuning.
+            data = yield from buf.readsome(size=65535)
+
+            if not data:
+                out.feed_eof()
+                break
+
+            events = self._conn.receive_data(data)
+            out.feed_data(events, len(data))
+
+
+class Http2Message(HttpMessage):
+    """
+    A HTTP/2-specific version of the ``HttpMessage`` ABC.
+    """
+    HOP_HEADERS = []
+
+    def __init__(self, conn, transport, stream_id):
+        self._conn = conn
+        self._stream_id = stream_id
+        super().__init__(transport, version=HttpVersion20, close=False)
+
+    def keep_alive(self):
+        return True
+
+    def add_header(self, name, value):
+        # HTTP/2 doesn't do chunked.
+        if name == aiohttp.hdrs.TRANSFER_ENCODING:
+            return
+
+        # Nor does it do Connection.
+        if name == aiohttp.hdrs.CONNECTION:
+            return
+
+        return super().add_header(name, value)
+
+    def send_headers(self, *args, **kwargs):
+        """
+        A complete override of the equivalent method from the ABC.
+        """
+        assert not self.headers_sent, 'headers have been sent already'
+        self.headers_sent = True
+
+        # We always use either the EOF payload writer or the length payload
+        # writer.
+        self.writer = self._write_h2_payload()
+        next(self.writer)
+        self._add_default_headers()
+
+        # Send the headers.
+        headers = [(':status', str(self.status))]
+        headers.extend(self.headers.items())
+        self._conn.send_headers(stream_id=self._stream_id, headers=headers)
+        headers_data = self._conn.data_to_send()
+
+        self.output_length += len(headers_data)
+        self.headers_length = len(headers_data)
+        self.transport.write(headers_data)
+
+    def _write_h2_payload(self):
+        while True:
+            try:
+                chunk = yield
+            except aiohttp.EofStream:
+                break
+
+            self._conn.send_data(stream_id=self._stream_id, data=chunk)
+            sent_data = self._conn.data_to_send()
+            self.transport.write(sent_data)
+            self.output_length += len(sent_data)
+
+        self._conn.end_stream(stream_id=self._stream_id)
+        sent_data = self._conn.data_to_send()
+        self.transport.write(sent_data)
+
+    def _add_default_headers(self):
+        # This is a no-op for HTTP/2, we don't want to add Connection headers.
+        return
+
+
+class Http2Response(Http2Message):
+    """
+    A HTTP/2-equivalent of aiohttp.protocol.Response
+    """
+    def __init__(self, conn, transport, status, stream_id):
+        self._status = status
+        super().__init__(conn, transport, stream_id)
+
+    def status_line(self):
+        return ""
+
+    @staticmethod
+    def calc_reason(*args, **kwargs):
+        return ""
+
+    @property
+    def status(self):
+        return self._status
+
+    @property
+    def reason(self):
+        return ""
+
+    def autochunked(self):
+        return False
+
+    def _add_default_headers(self):
+        super()._add_default_headers()
+
+        if aiohttp.hdrs.DATE not in self.headers:
+            # format_date_time(None) is quite expensive
+            self.headers.setdefault(aiohttp.hdrs.DATE, format_date_time(None))
+        self.headers.setdefault(aiohttp.hdrs.SERVER, self.SERVER_SOFTWARE)
